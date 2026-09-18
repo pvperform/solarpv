@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <title>Solar PV Dashboard</title>
+    <script src="https://www.lactame.com/lib/ml/6.0.0/ml.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root { --bg: #0f172a; --card: #1e293b; --accent: #38bdf8; --text: #f1f5f9; }
+        body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; padding: 2rem; }
+        .card { background: var(--card); padding: 2rem; border-radius: 20px; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 20px; }
+        .live-monitor { font-size: 1.2rem; font-weight: 700; color: var(--accent); }
+        table { width: 100%; border-collapse: separate; border-spacing: 0 10px; margin-top: 10px; }
+        th { color: #94a3b8; font-size: 0.75rem; text-transform: uppercase; padding: 10px; }
+        td { background: #1e293b; padding: 12px; text-align: center; }
+        .status-fault { color: #f43f5e; font-weight: bold; background: rgba(244, 63, 94, 0.1); }
+        .status-normal { color: #10b981; font-weight: bold; background: rgba(16, 185, 129, 0.1); }
+        .shadow-yes { color: #f97316; font-weight: bold; }
+        .shadow-no { color: #10b981; }
+        .grid-8 { display: grid; grid-template-columns: repeat(8, 1fr); gap: 10px; margin-bottom: 15px; }
+        .grid-8 div { background: #0f172a; padding: 10px; border-radius: 8px; }
+        @media (max-width: 900px) { .grid-8 { grid-template-columns: repeat(4, 1fr); } }
+        @media (max-width: 600px) { .grid-8 { grid-template-columns: repeat(2, 1fr); } }
+        .meteo-label { font-size: 0.65rem; opacity: 0.7; }
+        .error-msg { background: #f43f5e33; padding: 10px; border-radius: 8px; margin: 10px 0; color: #f87171; }
+        .ml-status { font-size: 0.7rem; color: #94a3b8; margin-top: 8px; }
+        .debug-box { background: #0a0f1a; border: 1px solid #f59e0b; border-radius: 8px; padding: 12px; margin-top: 12px; font-family: monospace; font-size: 0.72rem; color: #f59e0b; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
+        .version-tag { position: fixed; top: 5px; right: 5px; background: #10b981; color: #000; padding: 4px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; z-index: 9999; }
+    </style>
+</head>
+<body>
+
+<div class="version-tag">v4.0</div>
+
+<div class="card">
+    <h2>Live Monitor</h2>
+    <div id="live-row" class="live-monitor">
+        <div id="live-time" style="font-size: 0.9rem; color: #94a3b8; margin-bottom: 10px;">Time: --:--:--</div>
+        <div class="grid-8">
+            <div>V: <span id="live-v">-</span>V</div>
+            <div>I: <span id="live-i">-</span>A</div>
+            <div>Irr: <span id="live-irr">-</span>W/m²</div>
+            <div>T: <span id="live-temp">-</span>°C</div>
+            <div>LDR: <span id="live-ldr">-</span></div>
+            <div>Shadow: <span id="live-shadow">-</span></div>
+            <div>Meteo Irr: <span id="live-meteo-irr">-</span>W/m²</div>
+            <div>Meteo T: <span id="live-meteo-temp">-</span>°C</div>
+        </div>
+        <div>Actual: <span id="live-actual">-</span>W | Predicted: <span id="live-pred">-</span>W | Status: <span id="live-status">-</span></div>
+        <div id="ml-status" class="ml-status">ML: waiting for data...</div>
+        <div id="debug-box" class="debug-box">Debug: loading...</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Performance Trend (Last 20 Readings)</h2>
+    <canvas id="powerChart" height="80"></canvas>
+</div>
+
+<div class="card">
+    <h2>Historical Logs (Last 10)</h2>
+    <div style="overflow-x:auto;">
+        <table id="history-table">
+            <thead>
+                <tr><th>Date &amp; Time</th><th>V</th><th>I</th><th>Irr</th><th>Temp</th>
+                    <th>Actual</th><th>Predicted</th><th>LDR</th><th>Shadow</th>
+                    <th>Status</th><th>Meteo Irr</th><th>Meteo T</th></tr>
+            </thead>
+            <tbody id="history-body"></tbody>
+        </table>
+    </div>
+    <div id="dashboard-error" class="error-msg" style="display:none;"></div>
+</div>
+
+<script>
+    console.log('%c🚀 DASHBOARD v4.0 LOADED', 'background:#10b981;color:#000;padding:4px;font-weight:bold;');
+
+    const SHEET_ID = '1XKPczK5Yy7QcuOrX2Ec-fUhUGam03B_8NvCxjGhNOHI';
+    const GVIZ_URL  = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=Data&_=${Date.now()}`;
+    const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbx3F50pZhfZO_3wMgDh90_OkEO3INZcG2CnRQ2CWMl4xo0yEjGHBxsLySkzXF3Gxv_o/exec';
+
+    const { RandomForestRegression } = ML;
+    let chart;
+
+    const OPEN_METEO_BASE = 'https://api.open-meteo.com/v1/forecast';
+    let userLat = 3.139, userLon = 101.6869;
+    let meteoData = { irradiance: null, temperature: null };
+
+    document.body.addEventListener('click', function once() {
+        if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+        document.body.removeEventListener('click', once);
+    });
+    let lastFaultAlertTime = 0;
+    const FAULT_ALERT_THROTTLE_MS = 60000;
+
+    function sendFaultNotification(a, p, i) {
+        if (Notification.permission === "granted" && Date.now() - lastFaultAlertTime > FAULT_ALERT_THROTTLE_MS) {
+            new Notification("⚠️ Solar PV Fault Detected!", { body: `Actual ${a.toFixed(2)}W, Expected ${p.toFixed(2)}W, Irr: ${i.toFixed(0)} W/m²`, requireInteraction: true });
+            lastFaultAlertTime = Date.now();
+        }
+    }
+
+    async function fetchWeather(lat, lon) {
+        try {
+            const r = await fetch(`${OPEN_METEO_BASE}?latitude=${lat}&longitude=${lon}&current=temperature_2m,shortwave_radiation&timezone=auto`);
+            if (!r.ok) throw new Error(r.status);
+            const d = await r.json();
+            return { irradiance: parseFloat(d.current.shortwave_radiation ?? 0), temperature: parseFloat(d.current.temperature_2m) };
+        } catch (e) { console.warn('Weather fetch failed:', e); return null; }
+    }
+
+    function getUserLocation() {
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(
+                p => { userLat = p.coords.latitude; userLon = p.coords.longitude; refreshWeather(); },
+                () => refreshWeather(),
+                { enableHighAccuracy: false, timeout: 10000 }
+            );
+        } else refreshWeather();
+    }
+
+    async function refreshWeather() {
+        const w = await fetchWeather(userLat, userLon);
+        if (w) {
+            meteoData.irradiance = w.irradiance;
+            meteoData.temperature = w.temperature;
+            document.getElementById('live-meteo-irr').textContent = w.irradiance.toFixed(0);
+            document.getElementById('live-meteo-temp').textContent = w.temperature.toFixed(1);
+        } else {
+            document.getElementById('live-meteo-irr').textContent = '--';
+            document.getElementById('live-meteo-temp').textContent = '--';
+        }
+    }
+
+    // Detect if a row is real data (has a timestamp)
+    function rowHasTimestamp(row) {
+        if (!row || !row.c || !row.c[0]) return false;
+        const cell = row.c[0];
+        // Real timestamp cell has .v or .f that's not empty
+        const hasV = cell.v !== null && cell.v !== undefined && cell.v !== '';
+        const hasF = cell.f !== null && cell.f !== undefined && cell.f !== '';
+        return hasV || hasF;
+    }
+
+    // Convert a timestamp cell to a display string
+    function timestampToDisplay(cell) {
+        if (!cell) return '--';
+        // Priority 1: Google's formatted string "5/23/2026 4:48:39"
+        if (cell.f && typeof cell.f === 'string' && cell.f.trim() !== '') {
+            const s = cell.f.trim();
+            // Try to convert to 12-hour with AM/PM
+            const m = s.match(/^(\d+)\/(\d+)\/(\d+)\s+(\d+):(\d+)(?::(\d+))?/);
+            if (m) {
+                const [, mo, dy, yr, hh, mm, ss] = m;
+                const h = +hh;
+                const ap = h >= 12 ? 'PM' : 'AM';
+                const h12 = h % 12 === 0 ? 12 : h % 12;
+                const p = n => String(n).padStart(2, '0');
+                return `${p(dy)}/${p(mo)}/${yr} ${p(h12)}:${p(mm)}:${p(ss || '00')} ${ap}`;
+            }
+            return s;
+        }
+        // Priority 2: parse "Date(...)"
+        if (typeof cell.v === 'string') {
+            const m = cell.v.match(/Date\((\d+),(\d+),(\d+)(?:,(\d+))?(?:,(\d+))?(?:,(\d+))?/);
+            if (m) {
+                const yr = +m[1], mo = +m[2] + 1, dy = +m[3];
+                const hh = +(m[4] || 0), mm = +(m[5] || 0), ss = +(m[6] || 0);
+                const ap = hh >= 12 ? 'PM' : 'AM';
+                const h12 = hh % 12 === 0 ? 12 : hh % 12;
+                const p = n => String(n).padStart(2, '0');
+                return `${p(dy)}/${p(mo)}/${yr} ${p(h12)}:${p(mm)}:${p(ss)} ${ap}`;
+            }
+            // ISO string
+            const iso = cell.v.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+            if (iso) {
+                const [, yr, mo, dy, hh, mm, ss] = iso;
+                const h = +hh;
+                const ap = h >= 12 ? 'PM' : 'AM';
+                const h12 = h % 12 === 0 ? 12 : h % 12;
+                const p = n => String(n).padStart(2, '0');
+                return `${p(dy)}/${p(mo)}/${yr} ${p(h12)}:${p(mm)}:${p(ss)} ${ap}`;
+            }
+            return cell.v;
+        }
+        return String(cell.v ?? '--');
+    }
+
+    async function fetchDataGViz() {
+        const r = await fetch(GVIZ_URL);
+        if (!r.ok) throw new Error(`GViz HTTP ${r.status}`);
+        const text = await r.text();
+        const s = text.indexOf('{'), e = text.lastIndexOf('}');
+        if (s === -1) throw new Error('Invalid GViz response');
+        const json = JSON.parse(text.substring(s, e + 1));
+        if (!json.table || !json.table.rows) return { cols: [], rows: [], raw: json };
+
+        const cols = json.table.cols.map(c => c.label || c.id || '');
+
+        // FILTER: only rows that actually have a timestamp (drop phantom empty rows)
+        const dataRows = json.table.rows.filter(rowHasTimestamp);
+
+        const rows = dataRows.map(row => {
+            return row.c.map((cell, idx) => {
+                if (!cell) return '';
+                if (idx === 0) return timestampToDisplay(cell);
+                return cell.v !== null && cell.v !== undefined ? cell.v : (cell.f ?? '');
+            });
+        });
+
+        return { cols, rows, raw: json, totalRaw: json.table.rows.length };
+    }
+
+    async function updateDashboard() {
+        try {
+            const { rows, raw, totalRaw } = await fetchDataGViz();
+
+            if (!rows || rows.length < 1) {
+                document.getElementById('ml-status').textContent = 'ML: no data';
+                document.getElementById('debug-box').textContent = `v4.0 — GViz rows total: ${totalRaw}, real: 0`;
+                return;
+            }
+
+            const parsed = rows.map(row => ({
+                timestamp: row[0],
+                voltage: parseFloat(row[1]),
+                current: parseFloat(row[2]),
+                irradiance: parseFloat(row[3]),
+                temperature: parseFloat(row[4]),
+                actualPower: parseFloat(row[5]),
+                ldrRaw: parseInt(row[6]),
+                shadowDetected: row[7] === true || row[7] === 'true' || row[7] === 'TRUE',
+                predictedPower: row[9] ? parseFloat(row[9]) : null,
+                status: row[10] || '',
+                meteoIrr: row[11] ? parseFloat(row[11]) : null,
+                meteoTemp: row[12] ? parseFloat(row[12]) : null
+            }));
+
+            const latest = parsed[parsed.length - 1];
+
+            // LIVE MONITOR
+            document.getElementById('live-time').textContent = 'Time: ' + (latest.timestamp || '--');
+            console.log('⏰ LIVE-TIME:', latest.timestamp);
+            document.getElementById('live-v').textContent = isNaN(latest.voltage) ? '-' : latest.voltage.toFixed(1);
+            document.getElementById('live-i').textContent = isNaN(latest.current) ? '-' : latest.current.toFixed(1);
+            document.getElementById('live-irr').textContent = isNaN(latest.irradiance) ? '-' : latest.irradiance.toFixed(0);
+            document.getElementById('live-temp').textContent = isNaN(latest.temperature) ? '-' : latest.temperature.toFixed(1);
+            document.getElementById('live-ldr').textContent = isNaN(latest.ldrRaw) ? '-' : latest.ldrRaw;
+            const shadowSpan = document.getElementById('live-shadow');
+            shadowSpan.textContent = latest.shadowDetected ? "YES" : "NO";
+            shadowSpan.className = latest.shadowDetected ? "shadow-yes" : "shadow-no";
+            document.getElementById('live-actual').textContent = isNaN(latest.actualPower) ? '-' : latest.actualPower.toFixed(2);
+
+            // ML
+            const trainingRows = parsed.filter(r => !isNaN(r.irradiance) && !isNaN(r.temperature) && !isNaN(r.actualPower));
+            let model = null, predicted = 0, status = 'NORMAL';
+
+            if (trainingRows.length >= 5) {
+                const X = trainingRows.map(r => [r.irradiance, r.temperature]);
+                const y = trainingRows.map(r => r.actualPower);
+                model = new RandomForestRegression({ nEstimators: 50 });
+                model.train(X, y);
+                document.getElementById('ml-status').textContent = `ML: RF trained on ${trainingRows.length} samples`;
+
+                if (!isNaN(latest.irradiance) && latest.irradiance > 0) {
+                    predicted = model.predict([[latest.irradiance, latest.temperature]])[0];
+                    status = (latest.actualPower / predicted < 0.8) ? "FAULT" : "NORMAL";
+                }
+                document.getElementById('live-pred').textContent = predicted.toFixed(2);
+                const statusEl = document.getElementById('live-status');
+                statusEl.textContent = status;
+                statusEl.className = `status-${status.toLowerCase()}`;
+                if (status === "FAULT" && latest.irradiance > 0) sendFaultNotification(latest.actualPower, predicted, latest.irradiance);
+            } else {
+                document.getElementById('ml-status').textContent = `ML: need ${5 - trainingRows.length} more samples (have ${trainingRows.length})`;
+                document.getElementById('live-pred').textContent = '0.00';
+                document.getElementById('live-status').textContent = 'NORMAL';
+            }
+
+            // HISTORY TABLE
+            const last10 = parsed.slice(-10).reverse();
+            document.getElementById('history-body').innerHTML = last10.map(r => {
+                let rowPred = r.predictedPower;
+                if ((rowPred === null || isNaN(rowPred)) && model && !isNaN(r.irradiance) && r.irradiance > 0) {
+                    rowPred = model.predict([[r.irradiance, r.temperature]])[0];
+                }
+                if (rowPred === null || isNaN(rowPred)) rowPred = 0;
+                let rowStatus = r.status || (r.irradiance > 0 && rowPred > 0 && r.actualPower / rowPred < 0.8 ? "FAULT" : "NORMAL");
+                return `<tr>
+                    <td>${r.timestamp || '--'}</td>
+                    <td>${isNaN(r.voltage) ? '-' : r.voltage.toFixed(1)}</td>
+                    <td>${isNaN(r.current) ? '-' : r.current.toFixed(1)}</td>
+                    <td>${isNaN(r.irradiance) ? '-' : r.irradiance.toFixed(0)}</td>
+                    <td>${isNaN(r.temperature) ? '-' : r.temperature.toFixed(1)}</td>
+                    <td>${isNaN(r.actualPower) ? '-' : r.actualPower.toFixed(2)}</td>
+                    <td>${rowPred.toFixed(2)}</td>
+                    <td>${isNaN(r.ldrRaw) ? '-' : r.ldrRaw}</td>
+                    <td class="${r.shadowDetected ? 'shadow-yes' : 'shadow-no'}">${r.shadowDetected ? 'YES' : 'NO'}</td>
+                    <td class="status-${rowStatus.toLowerCase()}">${rowStatus}</td>
+                    <td>${r.meteoIrr !== null ? r.meteoIrr.toFixed(0) : '--'}</td>
+                    <td>${r.meteoTemp !== null ? r.meteoTemp.toFixed(1) : '--'}</td>
+                </tr>`;
+            }).join('');
+
+            // CHART
+            const last20 = parsed.slice(-20);
+            const labels = last20.map(r => (r.timestamp || '').replace(/:\d{2}(:\d{2})?\s*(AM|PM)?$/i, ' $2'));
+            const actuals = last20.map(r => r.actualPower);
+            const preds = last20.map(r => {
+                if (model && r.predictedPower && !isNaN(r.predictedPower)) return r.predictedPower;
+                if (model && !isNaN(r.irradiance) && r.irradiance > 0) return model.predict([[r.irradiance, r.temperature]])[0];
+                return r.predictedPower || 0;
+            });
+            if (chart) chart.destroy();
+            chart = new Chart(document.getElementById('powerChart').getContext('2d'), {
+                type: 'line',
+                data: { labels, datasets: [
+                    { label: 'Actual Power (W)', data: actuals, borderColor: '#38bdf8', tension: 0.4, fill: false },
+                    { label: 'Predicted Power (W)', data: preds, borderColor: '#f97316', tension: 0.4, fill: false, borderDash: [5,5] }
+                ]},
+                options: { responsive: true, plugins: { tooltip: { mode: 'index' }, legend: { labels: { color: '#f1f5f9' } } },
+                    scales: { x: { ticks: { color: '#94a3b8', maxRotation: 45, minRotation: 30, autoSkip: true, maxTicksLimit: 8 } },
+                              y: { ticks: { color: '#94a3b8' }, title: { display: true, text: 'Power (W)', color: '#94a3b8' } } } }
+            });
+
+            // DEBUG
+            document.getElementById('debug-box').textContent =
+                `v4.0 — GViz rows: ${totalRaw}, after filter: ${rows.length}\n` +
+                `Latest timestamp: "${latest.timestamp}"\n` +
+                `Latest 3 timestamps: ${parsed.slice(-3).map(r => `"${r.timestamp}"`).join(', ')}`;
+
+            // POST — use no-cors so redirects don't produce errors
+            const lastRowIndex = rows.length + 1;
+            try {
+                await fetch(SCRIPT_URL, {
+                    method: 'POST',
+                    mode: 'no-cors',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify({
+                        type: 'update', row: lastRowIndex,
+                        pred: predicted.toFixed(2), status,
+                        meteo_irradiance: meteoData.irradiance ?? 0,
+                        meteo_temp: meteoData.temperature ?? 0
+                    })
+                });
+                console.log(`✅ v4.0 posted row ${lastRowIndex}`);
+            } catch (e) {
+                console.warn('POST failed:', e.message);
+            }
+
+            document.getElementById('dashboard-error').style.display = 'none';
+        } catch (err) {
+            console.error('Dashboard error:', err);
+            const errDiv = document.getElementById('dashboard-error');
+            errDiv.style.display = 'block';
+            errDiv.textContent = 'Error: ' + err.message;
+            document.getElementById('debug-box').textContent = 'v4.0 ERROR: ' + err.message;
+        }
+    }
+
+    async function updateAll() { await refreshWeather(); await updateDashboard(); }
+    getUserLocation();
+    setTimeout(updateAll, 2000);
+    setInterval(updateAll, 5000);
+</script>
+</body>
+</html>
