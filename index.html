@@ -32,7 +32,7 @@
 </head>
 <body>
 
-<div class="version-tag">v4.0</div>
+<!--<div class="version-tag">v4.1</div>-->
 
 <div class="card">
     <h2>Live Monitor</h2>
@@ -50,7 +50,7 @@
         </div>
         <div>Actual: <span id="live-actual">-</span>W | Predicted: <span id="live-pred">-</span>W | Status: <span id="live-status">-</span></div>
         <div id="ml-status" class="ml-status">ML: waiting for data...</div>
-        <div id="debug-box" class="debug-box">Debug: loading...</div>
+        <div id="debug-box" class="debug-box" style="display:none;">Debug: loading...</div>
     </div>
 </div>
 
@@ -75,7 +75,7 @@
 </div>
 
 <script>
-    console.log('%c🚀 DASHBOARD v4.0 LOADED', 'background:#10b981;color:#000;padding:4px;font-weight:bold;');
+    console.log('%c🚀 DASHBOARD v4.1 LOADED', 'background:#10b981;color:#000;padding:4px;font-weight:bold;');
 
     const SHEET_ID = '1XKPczK5Yy7QcuOrX2Ec-fUhUGam03B_8NvCxjGhNOHI';
     const GVIZ_URL  = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=Data&_=${Date.now()}`;
@@ -100,6 +100,12 @@
             new Notification("⚠️ Solar PV Fault Detected!", { body: `Actual ${a.toFixed(2)}W, Expected ${p.toFixed(2)}W, Irr: ${i.toFixed(0)} W/m²`, requireInteraction: true });
             lastFaultAlertTime = Date.now();
         }
+    }
+
+    // Clamp prediction to >= 0
+    function clampPrediction(value) {
+        if (isNaN(value) || value < 0) return 0;
+        return value;
     }
 
     async function fetchWeather(lat, lon) {
@@ -134,23 +140,18 @@
         }
     }
 
-    // Detect if a row is real data (has a timestamp)
     function rowHasTimestamp(row) {
         if (!row || !row.c || !row.c[0]) return false;
         const cell = row.c[0];
-        // Real timestamp cell has .v or .f that's not empty
         const hasV = cell.v !== null && cell.v !== undefined && cell.v !== '';
         const hasF = cell.f !== null && cell.f !== undefined && cell.f !== '';
         return hasV || hasF;
     }
 
-    // Convert a timestamp cell to a display string
     function timestampToDisplay(cell) {
         if (!cell) return '--';
-        // Priority 1: Google's formatted string "5/23/2026 4:48:39"
         if (cell.f && typeof cell.f === 'string' && cell.f.trim() !== '') {
             const s = cell.f.trim();
-            // Try to convert to 12-hour with AM/PM
             const m = s.match(/^(\d+)\/(\d+)\/(\d+)\s+(\d+):(\d+)(?::(\d+))?/);
             if (m) {
                 const [, mo, dy, yr, hh, mm, ss] = m;
@@ -162,7 +163,6 @@
             }
             return s;
         }
-        // Priority 2: parse "Date(...)"
         if (typeof cell.v === 'string') {
             const m = cell.v.match(/Date\((\d+),(\d+),(\d+)(?:,(\d+))?(?:,(\d+))?(?:,(\d+))?/);
             if (m) {
@@ -173,7 +173,6 @@
                 const p = n => String(n).padStart(2, '0');
                 return `${p(dy)}/${p(mo)}/${yr} ${p(h12)}:${p(mm)}:${p(ss)} ${ap}`;
             }
-            // ISO string
             const iso = cell.v.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
             if (iso) {
                 const [, yr, mo, dy, hh, mm, ss] = iso;
@@ -198,8 +197,6 @@
         if (!json.table || !json.table.rows) return { cols: [], rows: [], raw: json };
 
         const cols = json.table.cols.map(c => c.label || c.id || '');
-
-        // FILTER: only rows that actually have a timestamp (drop phantom empty rows)
         const dataRows = json.table.rows.filter(rowHasTimestamp);
 
         const rows = dataRows.map(row => {
@@ -219,7 +216,7 @@
 
             if (!rows || rows.length < 1) {
                 document.getElementById('ml-status').textContent = 'ML: no data';
-                document.getElementById('debug-box').textContent = `v4.0 — GViz rows total: ${totalRaw}, real: 0`;
+                document.getElementById('debug-box').textContent = `v4.1 — GViz rows total: ${totalRaw}, real: 0`;
                 return;
             }
 
@@ -242,7 +239,6 @@
 
             // LIVE MONITOR
             document.getElementById('live-time').textContent = 'Time: ' + (latest.timestamp || '--');
-            console.log('⏰ LIVE-TIME:', latest.timestamp);
             document.getElementById('live-v').textContent = isNaN(latest.voltage) ? '-' : latest.voltage.toFixed(1);
             document.getElementById('live-i').textContent = isNaN(latest.current) ? '-' : latest.current.toFixed(1);
             document.getElementById('live-irr').textContent = isNaN(latest.irradiance) ? '-' : latest.irradiance.toFixed(0);
@@ -265,7 +261,8 @@
                 document.getElementById('ml-status').textContent = `ML: RF trained on ${trainingRows.length} samples`;
 
                 if (!isNaN(latest.irradiance) && latest.irradiance > 0) {
-                    predicted = model.predict([[latest.irradiance, latest.temperature]])[0];
+                    // === CLAMP prediction to >= 0 ===
+                    predicted = clampPrediction(model.predict([[latest.irradiance, latest.temperature]])[0]);
                     status = (latest.actualPower / predicted < 0.8) ? "FAULT" : "NORMAL";
                 }
                 document.getElementById('live-pred').textContent = predicted.toFixed(2);
@@ -284,7 +281,8 @@
             document.getElementById('history-body').innerHTML = last10.map(r => {
                 let rowPred = r.predictedPower;
                 if ((rowPred === null || isNaN(rowPred)) && model && !isNaN(r.irradiance) && r.irradiance > 0) {
-                    rowPred = model.predict([[r.irradiance, r.temperature]])[0];
+                    // === CLAMP prediction to >= 0 ===
+                    rowPred = clampPrediction(model.predict([[r.irradiance, r.temperature]])[0]);
                 }
                 if (rowPred === null || isNaN(rowPred)) rowPred = 0;
                 let rowStatus = r.status || (r.irradiance > 0 && rowPred > 0 && r.actualPower / rowPred < 0.8 ? "FAULT" : "NORMAL");
@@ -310,7 +308,10 @@
             const actuals = last20.map(r => r.actualPower);
             const preds = last20.map(r => {
                 if (model && r.predictedPower && !isNaN(r.predictedPower)) return r.predictedPower;
-                if (model && !isNaN(r.irradiance) && r.irradiance > 0) return model.predict([[r.irradiance, r.temperature]])[0];
+                if (model && !isNaN(r.irradiance) && r.irradiance > 0) {
+                    // === CLAMP prediction to >= 0 ===
+                    return clampPrediction(model.predict([[r.irradiance, r.temperature]])[0]);
+                }
                 return r.predictedPower || 0;
             });
             if (chart) chart.destroy();
@@ -327,11 +328,11 @@
 
             // DEBUG
             document.getElementById('debug-box').textContent =
-                `v4.0 — GViz rows: ${totalRaw}, after filter: ${rows.length}\n` +
+                `v4.1 — GViz rows: ${totalRaw}, after filter: ${rows.length}\n` +
                 `Latest timestamp: "${latest.timestamp}"\n` +
                 `Latest 3 timestamps: ${parsed.slice(-3).map(r => `"${r.timestamp}"`).join(', ')}`;
 
-            // POST — use no-cors so redirects don't produce errors
+            // POST
             const lastRowIndex = rows.length + 1;
             try {
                 await fetch(SCRIPT_URL, {
@@ -345,7 +346,7 @@
                         meteo_temp: meteoData.temperature ?? 0
                     })
                 });
-                console.log(`✅ v4.0 posted row ${lastRowIndex}`);
+                console.log(`✅ v4.1 posted row ${lastRowIndex}`);
             } catch (e) {
                 console.warn('POST failed:', e.message);
             }
@@ -356,7 +357,7 @@
             const errDiv = document.getElementById('dashboard-error');
             errDiv.style.display = 'block';
             errDiv.textContent = 'Error: ' + err.message;
-            document.getElementById('debug-box').textContent = 'v4.0 ERROR: ' + err.message;
+            document.getElementById('debug-box').textContent = 'v4.1 ERROR: ' + err.message;
         }
     }
 
